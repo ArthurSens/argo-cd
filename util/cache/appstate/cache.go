@@ -76,6 +76,10 @@ func clusterInfoKey(server string) string {
 	return fmt.Sprintf("cluster|info|%s", server)
 }
 
+func repoRevisionKey(repo string, revision string) string {
+	return fmt.Sprintf("repo|revision|%s/%s", repo, revision)
+}
+
 func (c *Cache) GetAppResourcesTree(appName string, res *appv1.ApplicationTree) error {
 	err := c.GetItem(appResourcesTreeKey(appName), &res)
 	return err
@@ -103,4 +107,12 @@ func (c *Cache) SetClusterInfo(server string, info *appv1.ClusterInfo) error {
 func (c *Cache) GetClusterInfo(server string, res *appv1.ClusterInfo) error {
 	err := c.GetItem(clusterInfoKey(server), &res)
 	return err
+}
+
+func (c *Cache) SetRepositoryRevisionSHA(repo string, revision string, duration time.Duration, sha string) error {
+	return c.SetItem(repoRevisionKey(repo, revision), sha, duration, false)
+}
+
+func (c *Cache) GetRepositoryRevisionSHA(repo string, revision string, sha *string) error {
+	return c.GetItem(repoRevisionKey(repo, revision), sha)
 }

@@ -7,6 +7,8 @@ import (
 	"reflect"
 	"time"
 
+	"github.com/argoproj/argo-cd/v2/util/helm"
+
 	"github.com/argoproj/gitops-engine/pkg/diff"
 	"github.com/argoproj/gitops-engine/pkg/health"
 	"github.com/argoproj/gitops-engine/pkg/sync"
@@ -15,6 +17,7 @@ import (
 	resourceutil "github.com/argoproj/gitops-engine/pkg/sync/resource"
 	"github.com/argoproj/gitops-engine/pkg/utils/kube"
 	kubeutil "github.com/argoproj/gitops-engine/pkg/utils/kube"
+	"github.com/argoproj/gitops-engine/pkg/utils/text"
 	log "github.com/sirupsen/logrus"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
@@ -32,6 +35,7 @@ import (
 	"github.com/argoproj/argo-cd/v2/util/argo"
 	appstatecache "github.com/argoproj/argo-cd/v2/util/cache/appstate"
 	"github.com/argoproj/argo-cd/v2/util/db"
+	"github.com/argoproj/argo-cd/v2/util/git"
 	"github.com/argoproj/argo-cd/v2/util/gpg"
 	argohealth "github.com/argoproj/argo-cd/v2/util/health"
 	"github.com/argoproj/argo-cd/v2/util/io"
@@ -75,7 +79,7 @@ func GetLiveObjsForApplicationHealth(resources []managedResource, statuses []app
 
 // AppStateManager defines methods which allow to compare application spec and actual application state.
 type AppStateManager interface {
-	CompareAppState(app *v1alpha1.Application, project *appv1.AppProject, revision string, source v1alpha1.ApplicationSource, noCache bool, localObjects []string) *comparisonResult
+	CompareAppState(app *v1alpha1.Application, project *appv1.AppProject, revision string, source v1alpha1.ApplicationSource, noRevisionCache bool, noCache bool, localObjects []string) *comparisonResult
 	SyncAppState(app *v1alpha1.Application, state *v1alpha1.OperationState)
 }
 
@@ -367,7 +371,7 @@ func (m *appStateManager) diffArrayCached(configArray []*unstructured.Unstructur
 // CompareAppState compares application git state to the live app state, using the specified
 // revision and supplied source. If revision or overrides are empty, then compares against
 // revision and overrides in the app spec.
-func (m *appStateManager) CompareAppState(app *v1alpha1.Application, project *appv1.AppProject, revision string, source v1alpha1.ApplicationSource, noCache bool, localManifests []string) *comparisonResult {
+func (m *appStateManager) CompareAppState(app *v1alpha1.Application, project *appv1.AppProject, revision string, source v1alpha1.ApplicationSource, noRevisionCache bool, noCache bool, localManifests []string) *comparisonResult {
 	ts := stats.NewTimingStats()
 	appLabelKey, resourceOverrides, diffNormalizer, resFilter, err := m.getComparisonSettings(app)
 	ts.AddCheckpoint("settings_ms")
@@ -399,6 +403,36 @@ func (m *appStateManager) CompareAppState(app *v1alpha1.Application, project *ap
 	var targetObjs []*unstructured.Unstructured
 	var manifestInfo *apiclient.ManifestResponse
 	now := metav1.Now()
+
+	alreadyResolved := false
+	if source.Chart == "" {
+		revision = text.FirstNonEmpty(revision, "HEAD")
+		alreadyResolved = git.IsCommitSHA(revision) || git.IsTruncatedCommitSHA(revision)
+	} else {
+		revision = text.FirstNonEmpty(revision, "*")
+		alreadyResolved = helm.IsVersion(revision) || helm.IsHelmOciRepo(source.RepoURL)
+	}
+	if !alreadyResolved {
+		revisionResolvedFromCache := false
+		unresolved := revision
+		if !noCache && !noRevisionCache {
+			cachedResolved := ""
+			if err := m.cache.GetRepositoryRevisionSHA(source.RepoURL, revision, &cachedResolved); err == nil {
+				revision = cachedResolved
+				revisionResolvedFromCache = true
+			}
+		}
+		if !revisionResolvedFromCache {
+			defer func() {
+				if manifestInfo != nil && manifestInfo.Revision != "" {
+					err := m.cache.SetRepositoryRevisionSHA(app.Spec.Source.RepoURL, unresolved, m.statusRefreshTimeout, manifestInfo.Revision)
+					if err != nil {
+						log.Warnf("Failed to cache resolved revision: %v", err)
+					}
+				}
+			}()
+		}
+	}
 
 	if len(localManifests) == 0 {
 		targetObjs, manifestInfo, err = m.getRepoObjs(app, source, appLabelKey, revision, noCache, verifySignature)

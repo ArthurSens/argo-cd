@@ -66,6 +66,8 @@ const (
 type CompareWith int
 
 const (
+	// Compare live application state against state defined in latest git revision with no resolved revision caching.
+	CompareWithLatestForceResolve CompareWith = 3
 	// Compare live application state against state defined in latest git revision.
 	CompareWithLatest CompareWith = 2
 	// Compare live application state against state defined using revision of most recent comparison.
@@ -1193,12 +1195,12 @@ func (ctrl *ApplicationController) processAppRefreshQueueItem() (processNext boo
 	}
 
 	revision := app.Spec.Source.TargetRevision
-	if comparisonLevel == CompareWithRecent {
+	if comparisonLevel <= CompareWithRecent {
 		revision = app.Status.Sync.Revision
 	}
 
 	now := metav1.Now()
-	compareResult := ctrl.appStateManager.CompareAppState(app, project, revision, app.Spec.Source, refreshType == appv1.RefreshTypeHard, localManifests)
+	compareResult := ctrl.appStateManager.CompareAppState(app, project, revision, app.Spec.Source, comparisonLevel == CompareWithLatestForceResolve, refreshType == appv1.RefreshTypeHard, localManifests)
 	for k, v := range compareResult.timings {
 		logCtx = logCtx.WithField(k, v.Milliseconds())
 	}
@@ -1229,7 +1231,7 @@ func (ctrl *ApplicationController) processAppRefreshQueueItem() (processNext boo
 		logCtx.Info("Sync prevented by sync window")
 	}
 
-	if app.Status.ReconciledAt == nil || comparisonLevel == CompareWithLatest {
+	if app.Status.ReconciledAt == nil || comparisonLevel >= CompareWithLatest {
 		app.Status.ReconciledAt = &now
 	}
 	app.Status.Sync = *compareResult.syncStatus
@@ -1254,7 +1256,7 @@ func resourceStatusKey(res appv1.ResourceStatus) string {
 func (ctrl *ApplicationController) needRefreshAppStatus(app *appv1.Application, statusRefreshTimeout time.Duration) (bool, appv1.RefreshType, CompareWith) {
 	logCtx := log.WithFields(log.Fields{"application": app.Name})
 	var reason string
-	compareWith := CompareWithLatest
+	compareWith := CompareWithLatestForceResolve
 	refreshType := appv1.RefreshTypeNormal
 	expired := app.Status.ReconciledAt == nil || app.Status.ReconciledAt.Add(statusRefreshTimeout).Before(time.Now().UTC())
 
